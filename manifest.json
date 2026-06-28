@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "SharePoint List Cloner",
+  "version": "1.0",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "https://*.sharepoint.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
