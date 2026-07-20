@@ -105,6 +105,7 @@
     <button class="tab-btn active" id="tab-export">Export List</button>
     <button class="tab-btn" id="tab-import">Import List</button>
     <button class="tab-btn" id="tab-versions">Version Viewer</button>
+    <button class="tab-btn" id="tab-ct-manager">Content Type Manager</button>
   </div>
 
   <div id="status" class="status"></div>
@@ -140,8 +141,22 @@
       <button id="viewVersionsBtn" class="action-btn" style="width: auto; white-space: nowrap;">Fetch Versions</button>
     </div>
     
-    <div id="versionTableContainer" style="margin-top: 15px; overflow-x: auto; max-height: 400px; width: 100%;">
-      </div>
+    <div id="versionTableContainer" style="margin-top: 15px; overflow-x: auto; max-height: 400px; width: 100%;"></div>
+  </div>
+
+  <div id="content-ct-manager" class="tab-content" style="display: none;">
+    <p style="font-size: 13px; margin-top: 0; color: #605e5c;">
+      View and audit content types deployed to the current site collection.
+    </p>
+    <button id="fetchCtBtn" class="action-btn" style="margin-bottom: 15px;">Fetch Site Content Types</button>
+    
+    <div class="form-group" id="ctFilterContainer" style="display: none; margin-bottom: 15px;">
+      <label for="ctFilterInput">Filter Content Types by Title</label>
+      <input type="text" id="ctFilterInput" placeholder="Type to filter list...">
+    </div>
+    
+    <div id="ctTableContainer" style="overflow-x: auto; max-height: 250px; width: 100%; border: 1px solid #edebe9; border-radius: 2px;"></div>
+    <div id="ctFieldsContainer" style="margin-top: 20px; overflow-x: auto; max-height: 250px; width: 100%;"></div>
   </div>
 
   <script src="popup.js"></script>

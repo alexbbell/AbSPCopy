@@ -3,16 +3,18 @@ document.addEventListener('DOMContentLoaded', () => {
   const exportTabBtn = document.getElementById('tab-export');
   const importTabBtn = document.getElementById('tab-import');
   const versionsTabBtn = document.getElementById('tab-versions');
+  const ctManagerTabBtn = document.getElementById('tab-ct-manager');
 
   const exportContent = document.getElementById('content-export');
   const importContent = document.getElementById('content-import');
   const versionsContent = document.getElementById('content-versions');
+  const ctManagerContent = document.getElementById('content-ct-manager');
 
   function switchTab(activeBtn, activeContent) {
-    [exportTabBtn, importTabBtn, versionsTabBtn].forEach(btn => {
+    [exportTabBtn, importTabBtn, versionsTabBtn, ctManagerTabBtn].forEach(btn => {
       if (btn) btn.classList.remove('active');
     });
-    [exportContent, importContent, versionsContent].forEach(content => {
+    [exportContent, importContent, versionsContent, ctManagerContent].forEach(content => {
       if (content) {
         content.classList.remove('active');
         content.style.display = 'none';
@@ -28,6 +30,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (exportTabBtn) exportTabBtn.addEventListener('click', () => switchTab(exportTabBtn, exportContent));
   if (importTabBtn) importTabBtn.addEventListener('click', () => switchTab(importTabBtn, importContent));
   if (versionsTabBtn) versionsTabBtn.addEventListener('click', () => switchTab(versionsTabBtn, versionsContent));
+  if (ctManagerTabBtn) ctManagerTabBtn.addEventListener('click', () => switchTab(ctManagerTabBtn, ctManagerContent));
 
   // ==========================================
   // 1. EXPORT FUNCTIONALITY
@@ -67,6 +70,65 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+
+  // ==========================================
+// BACKGROUND INJECTED SCRIPTS (MAIN WORLD)
+// ==========================================
+
+async function scrapeSharePointColumns() {
+  try {
+    // 1. Ensure _spPageContextInfo is present
+    if (typeof _spPageContextInfo === 'undefined') {
+      throw new Error("SharePoint context (_spPageContextInfo) not found.");
+    }
+
+    // 2. Extract the List ID from the URL query parameters (common on listedit.aspx)
+    const urlParams = new URLSearchParams(window.location.search);
+    let listId = urlParams.get('List') || urlParams.get('list');
+    
+    // Fallback to page context if URL doesn't yield it
+    if (!listId && _spPageContextInfo.pageListId) {
+      listId = _spPageContextInfo.pageListId;
+    }
+
+    if (!listId) {
+      throw new Error("Could not detect the SharePoint List ID from this page.");
+    }
+
+    // Clean up braces if present in the GUID
+    listId = listId.replace(/[{}]/g, "");
+
+    const siteUrl = window.location.protocol + "//" + window.location.host + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
+    
+    // 3. Query the fields, filtering out built-in hidden/readonly system fields 
+    // We explicitly request SchemaXml for CAML XML dynamic provisioning downstream
+    const restUrl = `${siteUrl}/_api/web/lists(guid'${listId}')/fields?$filter=Hidden eq false and ReadOnlyField eq false&$select=Title,InternalName,TypeAsString,SchemaXml,LookupList,LookupField`;
+
+    const res = await fetch(restUrl, {
+      method: "GET",
+      headers: { "Accept": "application/json;odata=nometadata" }
+    });
+
+    if (!res.ok) {
+      throw new Error(`SharePoint API rejected schema query with status ${res.status}`);
+    }
+
+    const data = await res.json();
+    
+    // 4. Map the payload to the layout specifications expected by the provision pipeline
+    return data.value.map(field => ({
+      title: field.Title,
+      internalName: field.InternalName,
+      type: field.TypeAsString,
+      schemaXml: field.SchemaXml,
+      lookupList: field.LookupList || null,
+      lookupField: field.LookupField || null
+    }));
+
+  } catch (e) {
+    return { error: e.message };
+  }
+}
 
   // ==========================================
   // 2. IMPORT FUNCTIONALITY
@@ -146,6 +208,59 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+
+  // ==========================================
+  // 4. CONTENT TYPE MANAGER FUNCTIONALITY
+  // ==========================================
+  const fetchCtBtn = document.getElementById('fetchCtBtn');
+  const ctFilterInput = document.getElementById('ctFilterInput');
+  const ctFilterContainer = document.getElementById('ctFilterContainer');
+
+  if (fetchCtBtn) {
+    fetchCtBtn.addEventListener('click', async () => {
+      updateStatus("Querying content types...", "info");
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: fetchSharePointContentTypes,
+          world: 'MAIN'
+        }, (results) => {
+          if (!results || !results[0]) {
+            updateStatus("Failed to fetch Content Types.", "error");
+            return;
+          }
+          const res = results[0].result;
+          if (res.error) {
+            updateStatus(`Error: ${res.error}`, "error");
+            return;
+          }
+
+          window.cachedContentTypes = res.contentTypes;
+          if (ctFilterInput) ctFilterInput.value = ""; // Reset filter text
+          if (ctFilterContainer) ctFilterContainer.style.display = 'block'; // Show filter UI
+          
+          renderContentTypeTable(res.contentTypes);
+          updateStatus(`Loaded ${res.contentTypes.length} content types sorted by title. Click a row to see fields.`, "success");
+        });
+      } catch (err) {
+        updateStatus(`Execution error: ${err.message}`, "error");
+      }
+    });
+  }
+
+  // Live filtering input watcher
+  if (ctFilterInput) {
+    ctFilterInput.addEventListener('input', () => {
+      if (!window.cachedContentTypes) return;
+      const query = ctFilterInput.value.toLowerCase();
+      const filtered = window.cachedContentTypes.filter(ct => 
+        ct.title.toLowerCase().includes(query)
+      );
+      renderContentTypeTable(filtered);
+    });
+  }
 });
 
 function updateStatus(msg, type) {
@@ -192,209 +307,120 @@ function renderVersionTable(versions) {
   container.innerHTML = html;
 }
 
-// ==========================================
-// PAGE CONTEXT SCRIPTS (Runs inside SharePoint)
-// ==========================================
-async function scrapeSharePointColumns() {
-  try {
-    const urlParams = new URLSearchParams(window.location.search);
-    let listId = urlParams.get('List');
-    if (!listId) throw new Error("Could not parse List GUID from page URL.");
-    listId = listId.replace(/[{}]/g, "");
+// Render Content Type master table
+function renderContentTypeTable(contentTypes) {
+  const container = document.getElementById('ctTableContainer');
+  const fieldsContainer = document.getElementById('ctFieldsContainer');
+  if (!container) return;
+  
+  fieldsContainer.innerHTML = ""; 
 
-    const siteUrl = window.location.protocol + "//" + window.location.host + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
-    const res = await fetch(`${siteUrl}/_api/web/lists/getbyid('${encodeURIComponent(listId)}')/fields`, {
-      method: "GET",
-      headers: { "Accept": "application/json;odata=nometadata" }
-    });
-    if (!res.ok) throw new Error(`API returned HTTP ${res.status}`);
-    const data = await res.json();
-
-    return data.value.map(field => {
-      if (field.FromBaseType || field.Hidden || field.ReadOnlyField) return null;
-      if (["ID", "Title", "Created", "Modified", "Author", "Editor", "Attachments"].includes(field.InternalName)) return null;
-
-      const info = { displayName: field.Title, internalName: field.InternalName, type: field.TypeAsString };
-      if (field.TypeAsString === "Lookup" || field.TypeAsString === "LookupMulti") {
-        info.lookupList = field.LookupList;
-        info.lookupField = field.LookupField;
-      }
-      return info;
-    }).filter(Boolean);
-  } catch (e) {
-    return { error: e.message };
+  if (contentTypes.length === 0) {
+    container.innerHTML = "<p style='font-size:12px; padding:10px;'>No matching content types found.</p>";
+    return;
   }
+
+  let html = `<table style="width:100%; border-collapse: collapse; font-size: 11px; background: white; cursor: pointer;">
+    <thead>
+      <tr style="background: #edebe9; text-align: left; position: sticky; top: 0; box-shadow: inset 0 -1px 0 #d2d0ce;">
+        <th style="padding: 6px; border: 1px solid #d2d0ce;">CTID</th>
+        <th style="padding: 6px; border: 1px solid #d2d0ce;">Title</th>
+        <th style="padding: 6px; border: 1px solid #d2d0ce;">Group</th>
+      </tr>
+    </thead>
+    <tbody>`;
+
+  contentTypes.forEach((ct, index) => {
+    html += `<tr class="ct-row" data-index="${index}" style="border-bottom: 1px solid #edebe9;">
+      <td style="padding: 6px; border: 1px solid #d2d0ce; font-family: Courier, monospace; font-size:10px; word-break: break-all;">${ct.id}</td>
+      <td style="padding: 6px; border: 1px solid #d2d0ce; font-weight: 600; color: #0078d4;">${ct.title}</td>
+      <td style="padding: 6px; border: 1px solid #d2d0ce; color: #484644;">${ct.group}</td>
+    </tr>`;
+  });
+
+  html += `</tbody></table>`;
+  container.innerHTML = html;
+
+  // Row event processing maps directly to the active array context
+  const rows = container.querySelectorAll('.ct-row');
+  rows.forEach((row, idx) => {
+    row.addEventListener('click', () => {
+      rows.forEach(r => r.style.backgroundColor = 'white');
+      row.style.backgroundColor = '#f3f2f1';
+      renderContentTypeFields(contentTypes[idx]);
+    });
+  });
 }
 
-async function provisionSharePointList(listTitle, columns) {
-  try {
-    const siteUrl = window.location.protocol + "//" + window.location.host + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
-    const contextRes = await fetch(`${siteUrl}/_api/contextinfo`, {
-      method: "POST",
-      headers: { "Accept": "application/json;odata=nometadata" }
+
+
+// Render fields array for a specific selected Content Type
+function renderContentTypeFields(ct) {
+  const container = document.getElementById('ctFieldsContainer');
+  if (!container) return;
+
+  let html = `<h4 style="margin: 0 0 8px 0; font-size: 12px; color: #323130;">Fields for: <span style="color:#0078d4;">${ct.title}</span></h4>
+    <table style="width:100%; border-collapse: collapse; font-size: 11px; background: white; border: 1px solid #d2d0ce;">
+    <thead>
+      <tr style="background: #f3f2f1; text-align: left;">
+        <th style="padding: 6px; border: 1px solid #d2d0ce; width: 30%;">Title</th>
+        <th style="padding: 6px; border: 1px solid #d2d0ce; width: 25%;">Internal Name</th>
+        <th style="padding: 6px; border: 1px solid #d2d0ce; width: 20%;">Type</th>
+        <th style="padding: 6px; border: 1px solid #d2d0ce; width: 25%;">Field ID</th>
+      </tr>
+    </thead>
+    <tbody>`;
+
+  if (!ct.fields || ct.fields.length === 0) {
+    html += `<tr><td colspan="4" style="padding: 8px; text-align: center; color: #a19f9d; font-style: italic;">No fields mapped to this content type structure.</td></tr>`;
+  } else {
+    ct.fields.forEach(f => {
+      html += `<tr style="border-bottom: 1px solid #edebe9;">
+        <td style="padding: 6px; border: 1px solid #d2d0ce; font-weight: 600; color: #323130;">${f.title}</td>
+        <td style="padding: 6px; border: 1px solid #d2d0ce; font-family: Courier, monospace; font-size:10px; color: #0078d4;">${f.internalName}</td>
+        <td style="padding: 6px; border: 1px solid #d2d0ce; color: #484644;">${f.type}</td>
+        <td style="padding: 6px; border: 1px solid #d2d0ce; font-family: Courier, monospace; font-size:10px; color: #605e5c;">${f.id}</td>
+      </tr>`;
     });
-    if (!contextRes.ok) throw new Error("Could not acquire FormDigest token.");
-    const contextData = await contextRes.json();
-    const formDigest = contextData.FormDigestValue;
-
-    const listResponse = await fetch(`${siteUrl}/_api/web/lists`, {
-      method: "POST",
-      body: JSON.stringify({ 'AllowContentTypes': true, 'BaseTemplate': 100, 'Title': listTitle }),
-      headers: {
-        "Accept": "application/json;odata=nometadata",
-        "Content-Type": "application/json;odata=nometadata",
-        "X-RequestDigest": formDigest
-      }
-    });
-    if (!listResponse.ok) {
-      const txt = await listResponse.text();
-      let m = txt; try { m = JSON.parse(txt)['odata.error'].message.value; } catch(e){}
-      throw new Error(`List rejection: ${m}`);
-    }
-    const listData = await listResponse.json();
-    const listId = listData.Id;
-
-    const createFieldUrl = `${siteUrl}/_api/web/lists/getbyid('${listId}')/fields/CreateFieldAsXml`;
-    let count = 0;
-    for (const col of columns) {
-      let xml = "";
-      if (col.type === "Lookup" || col.type === "LookupMulti") {
-        xml = `<Field Type="${col.type}" Name="${col.internalName}" DisplayName="${col.displayName}" List="${col.lookupList}" ShowField="${col.lookupField}" Mult="${col.type === "LookupMulti" ? "TRUE" : "FALSE"}"/>`;
-      } else {
-        xml = `<Field Type="${col.type}" Name="${col.internalName}" DisplayName="${col.displayName}"/>`;
-      }
-
-      const fRes = await fetch(createFieldUrl, {
-        method: "POST",
-        body: JSON.stringify({ parameters: { SchemaXml: xml } }),
-        headers: {
-          "Accept": "application/json;odata=nometadata",
-          "Content-Type": "application/json;odata=nometadata",
-          "X-RequestDigest": formDigest
-        }
-      });
-      if (!fRes.ok) {
-        const fTxt = await fRes.text();
-        let fM = fTxt; try { fM = JSON.parse(fTxt)['odata.error'].message.value; } catch(e){}
-        throw new Error(`Column ${col.displayName} failed: ${fM}`);
-      }
-      count++;
-    }
-    return { success: true, count: count };
-  } catch (err) {
-    return { success: false, error: err.message };
   }
+
+  html += `</tbody></table>`;
+  container.innerHTML = html;
 }
 
-async function fetchSharePointVersions(manualId) {
+// REST Pipeline target querying Content Types expanded with system field relationships
+async function fetchSharePointContentTypes() {
   try {
-    const urlParams = new URLSearchParams(window.location.search);
-    let listId = urlParams.get('List');
-    let itemId = manualId || urlParams.get('ID');
-
-    if (!listId && typeof _spPageContextInfo !== 'undefined' && _spPageContextInfo.pageListId) {
-      listId = _spPageContextInfo.pageListId;
-    }
-    if (!listId && window.Ctx) {
-      listId = window.Ctx.listName; 
-    }
-    if (!listId && window.WPQ2FormCtx && window.WPQ2FormCtx.ListAttributes) {
-      listId = window.WPQ2FormCtx.ListAttributes.Id;
-    }
-
-    if (!listId) throw new Error("Could not detect List GUID. Try navigating to a single item page.");
-    if (!itemId) throw new Error("Could not detect Item ID from URL. Please enter it manually.");
-
-    listId = listId.replace(/[{}]/g, "");
     const siteUrl = window.location.protocol + "//" + window.location.host + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
-
-    // 1. Fetch Field Display Name Map
-    const fieldsRes = await fetch(`${siteUrl}/_api/web/lists/getbyid('${listId}')/fields`, {
-      method: "GET",
-      headers: { "Accept": "application/json;odata=nometadata" }
-    });
-    if (!fieldsRes.ok) throw new Error("Failed to query list fields definition.");
-    const fieldsData = await fieldsRes.json();
+    // Explicitly select and expand fields to include TypeAsString and InternalName properties
+    const restUrl = `${siteUrl}/_api/web/contenttypes?$select=StringId,Name,Group,Fields/Id,Fields/Title,Fields/InternalName,Fields/TypeAsString&$expand=Fields`;
     
-    const userFieldMap = {};
-    fieldsData.value.forEach(field => {
-      userFieldMap[field.InternalName.toLowerCase()] = field.Title;
-    });
-
-    // 2. Query the full version timeline array via REST
-    const restVersionsUrl = `${siteUrl}/_api/web/lists/getbyid('${listId}')/items(${itemId})/versions`;
-    const res = await fetch(restVersionsUrl, {
+    const res = await fetch(restUrl, {
       method: "GET",
       headers: { "Accept": "application/json;odata=nometadata" }
     });
-    if (!res.ok) throw new Error(`REST version stream rejected with status ${res.status}`);
+    if (!res.ok) throw new Error(`Content type API rejected with status code ${res.status}`);
     const data = await res.json();
 
-    if (!data.value || data.value.length === 0) {
-      return { error: null, versions: [] };
-    }
-
-    // 3. Format and clean JSON properties
-    const formattedVersions = data.value.map(v => {
-      const fieldsChanged = {};
-      
-      Object.keys(v).forEach(key => {
-        const lowerKey = key.toLowerCase();
-        
-        // --- STRICT FILTERING FOR ODATA & SYSTEM FIELDS ---
-        if (lowerKey.includes('odata') || lowerKey.startsWith('__')) return;
-        
-        // Skip system structural metadata fields
-        const systemExclusions = [
-          "iscurrentversion", "versionid", "versionlabel", "editor", "modified", "created",
-          "id", "author", "attachments", "guid", "filesystemobjecttype", "serverredirectedurl"
-        ];
-        if (systemExclusions.includes(lowerKey)) return;
-        
-        // Skip link structures, metadata pointers, or operational hashes
-        if (lowerKey.endsWith('meta') || lowerKey.endsWith('stringid') || lowerKey.endsWith('hash')) return;
-
-        let val = v[key];
-        if (val === null || val === undefined || val === "") return;
-
-        let cleanVal = typeof val === 'object' ? JSON.stringify(val) : String(val);
-
-        // Skip fields that just output empty/generic arrays or objects
-        if (cleanVal === '[]' || cleanVal === '{}') return;
-
-        // Pretty print JSON structures (such as multi-choice comment grids or workflow logs)
-        if (cleanVal.startsWith('[') || cleanVal.startsWith('{')) {
-          try {
-            const parsed = JSON.parse(cleanVal);
-            if (Array.isArray(parsed)) {
-              cleanVal = parsed.map(item => item.text || JSON.stringify(item)).join("<br/>");
-            }
-          } catch(e) {}
-        }
-
-        // Translate the internal name into the clean display title
-        const displayLabel = userFieldMap[lowerKey] || key;
-        fieldsChanged[displayLabel] = cleanVal;
-      });
-
-      // Handle the version modifier info cleanly
-      let editorUser = "System Account";
-      if (v.Editor) {
-        editorUser = v.Editor.LookupValue || v.Editor.Email || (typeof v.Editor === 'object' ? v.Editor.Title : String(v.Editor));
-      }
-
+    const formattedCts = data.value.map(ct => {
       return {
-        versionLabel: v.VersionLabel || "?.0",
-        editor: editorUser,
-        modified: v.Modified ? new Date(v.Modified).toLocaleString() : "",
-        fields: fieldsChanged
+        id: ct.StringId || (ct.Id ? ct.Id.StringId : ""),
+        title: ct.Name,
+        group: ct.Group,
+        fields: (ct.Fields || []).map(f => ({
+          id: f.Id,
+          title: f.Title,
+          internalName: f.InternalName || "",
+          type: f.TypeAsString || "Unknown"
+        }))
       };
     });
 
-    formattedVersions.sort((a, b) => parseFloat(b.versionLabel) - parseFloat(a.versionLabel));
-    return { error: null, versions: formattedVersions };
+    // Alphabetical sort by Title field
+    formattedCts.sort((a, b) => a.title.localeCompare(b.title));
 
+    return { error: null, contentTypes: formattedCts };``
   } catch (e) {
-    return { error: e.message, versions: [] };
+    return { error: e.message, contentTypes: [] };
   }
 }
