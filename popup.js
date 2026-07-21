@@ -424,3 +424,117 @@ async function fetchSharePointContentTypes() {
     return { error: e.message, contentTypes: [] };
   }
 }
+
+
+async function fetchSharePointVersions(manualId) {
+  try {
+    const urlParams = new URLSearchParams(window.location.search);
+    let listId = urlParams.get('List');
+    let itemId = manualId || urlParams.get('ID');
+
+    if (!listId && typeof _spPageContextInfo !== 'undefined' && _spPageContextInfo.pageListId) {
+      listId = _spPageContextInfo.pageListId;
+    }
+    if (!listId && window.Ctx) {
+      listId = window.Ctx.listName; 
+    }
+    if (!listId && window.WPQ2FormCtx && window.WPQ2FormCtx.ListAttributes) {
+      listId = window.WPQ2FormCtx.ListAttributes.Id;
+    }
+
+    if (!listId) throw new Error("Could not detect List GUID. Try navigating to a single item page.");
+    if (!itemId) throw new Error("Could not detect Item ID from URL. Please enter it manually.");
+
+    listId = listId.replace(/[{}]/g, "");
+    const siteUrl = window.location.protocol + "//" + window.location.host + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
+
+    // 1. Fetch Field Display Name Map
+    const fieldsRes = await fetch(`${siteUrl}/_api/web/lists/getbyid('${listId}')/fields`, {
+      method: "GET",
+      headers: { "Accept": "application/json;odata=nometadata" }
+    });
+    if (!fieldsRes.ok) throw new Error("Failed to query list fields definition.");
+    const fieldsData = await fieldsRes.json();
+    
+    const userFieldMap = {};
+    fieldsData.value.forEach(field => {
+      userFieldMap[field.InternalName.toLowerCase()] = field.Title;
+    });
+
+    // 2. Query the full version timeline array via REST
+    const restVersionsUrl = `${siteUrl}/_api/web/lists/getbyid('${listId}')/items(${itemId})/versions`;
+    const res = await fetch(restVersionsUrl, {
+      method: "GET",
+      headers: { "Accept": "application/json;odata=nometadata" }
+    });
+    if (!res.ok) throw new Error(`REST version stream rejected with status ${res.status}`);
+    const data = await res.json();
+
+    if (!data.value || data.value.length === 0) {
+      return { error: null, versions: [] };
+    }
+
+    // 3. Format and clean JSON properties
+    const formattedVersions = data.value.map(v => {
+      const fieldsChanged = {};
+      
+      Object.keys(v).forEach(key => {
+        const lowerKey = key.toLowerCase();
+        
+        // --- STRICT FILTERING FOR ODATA & SYSTEM FIELDS ---
+        if (lowerKey.includes('odata') || lowerKey.startsWith('__')) return;
+        
+        // Skip system structural metadata fields
+        const systemExclusions = [
+          "iscurrentversion", "versionid", "versionlabel", "editor", "modified", "created",
+          "id", "author", "attachments", "guid", "filesystemobjecttype", "serverredirectedurl"
+        ];
+        if (systemExclusions.includes(lowerKey)) return;
+        
+        // Skip link structures, metadata pointers, or operational hashes
+        if (lowerKey.endsWith('meta') || lowerKey.endsWith('stringid') || lowerKey.endsWith('hash')) return;
+
+        let val = v[key];
+        if (val === null || val === undefined || val === "") return;
+
+        let cleanVal = typeof val === 'object' ? JSON.stringify(val) : String(val);
+
+        // Skip fields that just output empty/generic arrays or objects
+        if (cleanVal === '[]' || cleanVal === '{}') return;
+
+        // Pretty print JSON structures (such as multi-choice comment grids or workflow logs)
+        if (cleanVal.startsWith('[') || cleanVal.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(cleanVal);
+            if (Array.isArray(parsed)) {
+              cleanVal = parsed.map(item => item.text || JSON.stringify(item)).join("<br/>");
+            }
+          } catch(e) {}
+        }
+
+        // Translate the internal name into the clean display title
+        const displayLabel = userFieldMap[lowerKey] || key;
+        fieldsChanged[displayLabel] = cleanVal;
+      });
+
+      // Handle the version modifier info cleanly
+      let editorUser = "System Account";
+      if (v.Editor) {
+        editorUser = v.Editor.LookupValue || v.Editor.Email || (typeof v.Editor === 'object' ? v.Editor.Title : String(v.Editor));
+      }
+
+      return {
+        versionLabel: v.VersionLabel || "?.0",
+        editor: editorUser,
+        modified: v.Modified ? new Date(v.Modified).toLocaleString() : "",
+        fields: fieldsChanged
+      };
+    });
+
+    formattedVersions.sort((a, b) => parseFloat(b.versionLabel) - parseFloat(a.versionLabel));
+    return { error: null, versions: formattedVersions };
+
+  } catch (e) {
+    return { error: e.message, versions: [] };
+  }
+}
