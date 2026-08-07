@@ -2,19 +2,21 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- TAB NAVIGATION SWITCHING ---
   const exportTabBtn = document.getElementById('tab-export');
   const importTabBtn = document.getElementById('tab-import');
+  const copyItemTabBtn = document.getElementById('tab-copy-item');
   const versionsTabBtn = document.getElementById('tab-versions');
   const ctManagerTabBtn = document.getElementById('tab-ct-manager');
 
   const exportContent = document.getElementById('content-export');
   const importContent = document.getElementById('content-import');
+  const copyItemContent = document.getElementById('content-copy-item');
   const versionsContent = document.getElementById('content-versions');
   const ctManagerContent = document.getElementById('content-ct-manager');
 
   function switchTab(activeBtn, activeContent) {
-    [exportTabBtn, importTabBtn, versionsTabBtn, ctManagerTabBtn].forEach(btn => {
+    [exportTabBtn, importTabBtn, copyItemTabBtn, versionsTabBtn, ctManagerTabBtn].forEach(btn => {
       if (btn) btn.classList.remove('active');
     });
-    [exportContent, importContent, versionsContent, ctManagerContent].forEach(content => {
+    [exportContent, importContent, copyItemContent, versionsContent, ctManagerContent].forEach(content => {
       if (content) {
         content.classList.remove('active');
         content.style.display = 'none';
@@ -29,6 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (exportTabBtn) exportTabBtn.addEventListener('click', () => switchTab(exportTabBtn, exportContent));
   if (importTabBtn) importTabBtn.addEventListener('click', () => switchTab(importTabBtn, importContent));
+  if (copyItemTabBtn) copyItemTabBtn.addEventListener('click', () => switchTab(copyItemTabBtn, copyItemContent));
   if (versionsTabBtn) versionsTabBtn.addEventListener('click', () => switchTab(versionsTabBtn, versionsContent));
   if (ctManagerTabBtn) ctManagerTabBtn.addEventListener('click', () => switchTab(ctManagerTabBtn, ctManagerContent));
 
@@ -70,65 +73,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
-
-  // ==========================================
-// BACKGROUND INJECTED SCRIPTS (MAIN WORLD)
-// ==========================================
-
-async function scrapeSharePointColumns() {
-  try {
-    // 1. Ensure _spPageContextInfo is present
-    if (typeof _spPageContextInfo === 'undefined') {
-      throw new Error("SharePoint context (_spPageContextInfo) not found.");
-    }
-
-    // 2. Extract the List ID from the URL query parameters (common on listedit.aspx)
-    const urlParams = new URLSearchParams(window.location.search);
-    let listId = urlParams.get('List') || urlParams.get('list');
-    
-    // Fallback to page context if URL doesn't yield it
-    if (!listId && _spPageContextInfo.pageListId) {
-      listId = _spPageContextInfo.pageListId;
-    }
-
-    if (!listId) {
-      throw new Error("Could not detect the SharePoint List ID from this page.");
-    }
-
-    // Clean up braces if present in the GUID
-    listId = listId.replace(/[{}]/g, "");
-
-    const siteUrl = window.location.protocol + "//" + window.location.host + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
-    
-    // 3. Query the fields, filtering out built-in hidden/readonly system fields 
-    // We explicitly request SchemaXml for CAML XML dynamic provisioning downstream
-    const restUrl = `${siteUrl}/_api/web/lists(guid'${listId}')/fields?$filter=Hidden eq false and ReadOnlyField eq false&$select=Title,InternalName,TypeAsString,SchemaXml,LookupList,LookupField`;
-
-    const res = await fetch(restUrl, {
-      method: "GET",
-      headers: { "Accept": "application/json;odata=nometadata" }
-    });
-
-    if (!res.ok) {
-      throw new Error(`SharePoint API rejected schema query with status ${res.status}`);
-    }
-
-    const data = await res.json();
-    
-    // 4. Map the payload to the layout specifications expected by the provision pipeline
-    return data.value.map(field => ({
-      title: field.Title,
-      internalName: field.InternalName,
-      type: field.TypeAsString,
-      schemaXml: field.SchemaXml,
-      lookupList: field.LookupList || null,
-      lookupField: field.LookupField || null
-    }));
-
-  } catch (e) {
-    return { error: e.message };
-  }
-}
 
   // ==========================================
   // 2. IMPORT FUNCTIONALITY
@@ -173,7 +117,43 @@ async function scrapeSharePointColumns() {
   }
 
   // ==========================================
-  // 3. VERSIONS FUNCTIONALITY
+  // 3. COPY ITEM FUNCTIONALITY
+  // ==========================================
+  const copyItemBtn = document.getElementById('copyItemBtn');
+  if (copyItemBtn) {
+    copyItemBtn.addEventListener('click', async () => {
+      updateStatus("Duplicating item...", "info");
+      const manualId = document.getElementById('copyItemId').value.trim();
+
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: duplicateSharePointItem,
+          args: [manualId],
+          world: 'MAIN'
+        }, (results) => {
+          if (!results || !results[0]) {
+            updateStatus("Failed to communicate with page.", "error");
+            return;
+          }
+          const res = results[0].result;
+          if (res.error) {
+            updateStatus(`Error: ${res.error}`, "error");
+            return;
+          }
+
+          updateStatus(`Successfully duplicated item! New Item ID: ${res.newItemId}`, "success");
+        });
+      } catch (err) {
+        updateStatus(`Execution error: ${err.message}`, "error");
+      }
+    });
+  }
+
+  // ==========================================
+  // 4. VERSIONS FUNCTIONALITY
   // ==========================================
   const viewVersionsBtn = document.getElementById('viewVersionsBtn');
   if (viewVersionsBtn) {
@@ -210,7 +190,7 @@ async function scrapeSharePointColumns() {
   }
 
   // ==========================================
-  // 4. CONTENT TYPE MANAGER FUNCTIONALITY
+  // 5. CONTENT TYPE MANAGER FUNCTIONALITY
   // ==========================================
   const fetchCtBtn = document.getElementById('fetchCtBtn');
   const ctFilterInput = document.getElementById('ctFilterInput');
@@ -250,7 +230,6 @@ async function scrapeSharePointColumns() {
     });
   }
 
-  // Live filtering input watcher
   if (ctFilterInput) {
     ctFilterInput.addEventListener('input', () => {
       if (!window.cachedContentTypes) return;
@@ -307,7 +286,6 @@ function renderVersionTable(versions) {
   container.innerHTML = html;
 }
 
-// Render Content Type master table
 function renderContentTypeTable(contentTypes) {
   const container = document.getElementById('ctTableContainer');
   const fieldsContainer = document.getElementById('ctFieldsContainer');
@@ -341,7 +319,6 @@ function renderContentTypeTable(contentTypes) {
   html += `</tbody></table>`;
   container.innerHTML = html;
 
-  // Row event processing maps directly to the active array context
   const rows = container.querySelectorAll('.ct-row');
   rows.forEach((row, idx) => {
     row.addEventListener('click', () => {
@@ -352,9 +329,6 @@ function renderContentTypeTable(contentTypes) {
   });
 }
 
-
-
-// Render fields array for a specific selected Content Type
 function renderContentTypeFields(ct) {
   const container = document.getElementById('ctFieldsContainer');
   if (!container) return;
@@ -388,42 +362,98 @@ function renderContentTypeFields(ct) {
   container.innerHTML = html;
 }
 
-// REST Pipeline target querying Content Types expanded with system field relationships
-async function fetchSharePointContentTypes() {
+// ==========================================
+// INJECTED FUNCTION: DUPLICATE LIST ITEM
+// ==========================================
+async function duplicateSharePointItem(manualId) {
   try {
+    const urlParams = new URLSearchParams(window.location.search);
+    let listId = urlParams.get('List');
+    let itemId = manualId || urlParams.get('ID');
+
+    if (!listId && typeof _spPageContextInfo !== 'undefined' && _spPageContextInfo.pageListId) {
+      listId = _spPageContextInfo.pageListId;
+    }
+    if (!listId && window.Ctx) {
+      listId = window.Ctx.listName;
+    }
+
+    if (!listId) throw new Error("Could not detect List ID from context/URL.");
+    if (!itemId) throw new Error("Could not detect Item ID from URL. Please enter it manually.");
+
+    listId = listId.replace(/[{}]/g, "");
     const siteUrl = window.location.protocol + "//" + window.location.host + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
-    // Explicitly select and expand fields to include TypeAsString and InternalName properties
-    const restUrl = `${siteUrl}/_api/web/contenttypes?$select=StringId,Name,Group,Fields/Id,Fields/Title,Fields/InternalName,Fields/TypeAsString&$expand=Fields`;
-    
-    const res = await fetch(restUrl, {
+
+    // 1. Get Request Digest Token
+    let formDigest = _spPageContextInfo.formDigestValue || (document.getElementById('__REQUESTDIGEST') ? document.getElementById('__REQUESTDIGEST').value : null);
+    if (!formDigest) {
+      const digestRes = await fetch(`${siteUrl}/_api/contextinfo`, {
+        method: "POST",
+        headers: { "Accept": "application/json;odata=nometadata" }
+      });
+      if (digestRes.ok) {
+        const digestData = await digestRes.json();
+        formDigest = digestData.FormDigestValue;
+      }
+    }
+    if (!formDigest) throw new Error("Unable to obtain form digest token for operation authorization.");
+
+    // 2. Retrieve non-readonly, non-hidden custom fields definition
+    const fieldsRes = await fetch(`${siteUrl}/_api/web/lists/getbyid('${listId}')/fields?$filter=ReadOnlyField eq false and Hidden eq false`, {
       method: "GET",
       headers: { "Accept": "application/json;odata=nometadata" }
     });
-    if (!res.ok) throw new Error(`Content type API rejected with status code ${res.status}`);
-    const data = await res.json();
+    if (!fieldsRes.ok) throw new Error("Failed to fetch writable list fields.");
+    const fieldsData = await fieldsRes.json();
 
-    const formattedCts = data.value.map(ct => {
-      return {
-        id: ct.StringId || (ct.Id ? ct.Id.StringId : ""),
-        title: ct.Name,
-        group: ct.Group,
-        fields: (ct.Fields || []).map(f => ({
-          id: f.Id,
-          title: f.Title,
-          internalName: f.InternalName || "",
-          type: f.TypeAsString || "Unknown"
-        }))
-      };
+    const excludedSystemFields = [
+      "contenttype", "attachments", "folderchildcount", "itemchildcount", 
+      "edit", "linktitlenomenu", "linktitle", "docicon", "appauthor", "appeditor"
+    ];
+
+    const writableFields = fieldsData.value.filter(f => !excludedSystemFields.includes(f.InternalName.toLowerCase()));
+
+    // 3. Fetch source item details
+    const itemRes = await fetch(`${siteUrl}/_api/web/lists/getbyid('${listId}')/items(${itemId})`, {
+      method: "GET",
+      headers: { "Accept": "application/json;odata=nometadata" }
+    });
+    if (!itemRes.ok) throw new Error(`Could not locate source item ID #${itemId}.`);
+    const sourceItem = await itemRes.json();
+
+    // 4. Construct payload for new cloned item
+    const newItemPayload = {};
+    writableFields.forEach(field => {
+      const name = field.InternalName;
+      if (sourceItem.hasOwnProperty(name) && sourceItem[name] !== null && sourceItem[name] !== undefined) {
+        newItemPayload[name] = sourceItem[name];
+      }
     });
 
-    // Alphabetical sort by Title field
-    formattedCts.sort((a, b) => a.title.localeCompare(b.title));
+    // 5. Post to creation REST endpoint
+    const createRes = await fetch(`${siteUrl}/_api/web/lists/getbyid('${listId}')/items`, {
+      method: "POST",
+      headers: {
+        "Accept": "application/json;odata=nometadata",
+        "Content-Type": "application/json;odata=nometadata",
+        "X-RequestDigest": formDigest
+      },
+      body: JSON.stringify(newItemPayload)
+    });
 
-    return { error: null, contentTypes: formattedCts };``
+    if (!createRes.ok) {
+      const errText = await createRes.text();
+      throw new Error(`Item duplicate request failed: ${errText}`);
+    }
+
+    const createdItem = await createRes.json();
+    return { error: null, newItemId: createdItem.Id || createdItem.ID };
+
   } catch (e) {
-    return { error: e.message, contentTypes: [] };
+    return { error: e.message, newItemId: null };
   }
 }
+
 
 
 async function fetchSharePointVersions(manualId) {
