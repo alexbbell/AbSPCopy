@@ -568,3 +568,55 @@ async function fetchSharePointVersions(manualId) {
     return { error: e.message, versions: [] };
   }
 }
+
+
+function scrapeSharePointColumns() {
+  try {
+    // Strategy A: DOM Scraping from Classic List Settings page (listedit.aspx)
+    const columnRows = document.querySelectorAll("table[id*='rgList'] tr, table.ms-summarystandardbody tr");
+    const columns = [];
+
+    columnRows.forEach(row => {
+      const link = row.querySelector("a[href*='FldEdit.aspx']");
+      if (link) {
+        const title = link.textContent.trim();
+        const typeCell = row.querySelectorAll("td")[1];
+        const type = typeCell ? typeCell.textContent.trim() : "Single line of text";
+
+        columns.push({
+          Title: title,
+          FieldTypeKind: type
+        });
+      }
+    });
+
+    if (columns.length > 0) {
+      return columns;
+    }
+
+    // Strategy B: Fallback via REST API using context info
+    if (typeof _spPageContextInfo !== 'undefined' && _spPageContextInfo.pageListId) {
+      const siteUrl = _spPageContextInfo.webAbsoluteUrl;
+      const listId = _spPageContextInfo.pageListId.replace(/[{}]/g, '');
+      
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", `${siteUrl}/_api/web/lists/getbyid('${listId}')/fields?$filter=Hidden eq false and ReadOnlyField eq false`, false);
+      xhr.setRequestHeader("Accept", "application/json;odata=nometadata");
+      xhr.send();
+
+      if (xhr.status === 200) {
+        const res = JSON.parse(xhr.responseText);
+        return res.value.map(f => ({
+          Title: f.Title,
+          InternalName: f.InternalName,
+          TypeAsString: f.TypeAsString,
+          Required: f.Required
+        }));
+      }
+    }
+
+    return { error: "No columns found on page. Verify you are on List Settings." };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
