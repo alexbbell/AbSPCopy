@@ -133,3 +133,69 @@ export function renderContentTypeFields(ct) {
   html += `</tbody></table>`;
   container.innerHTML = html;
 }
+
+function escapeHtml(str) {
+  return String(str === null || str === undefined ? "" : str)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+export function renderSiteInfo(web) {
+  const container = document.getElementById('siteInfoContainer');
+  if (!container) return;
+  if (!web) {
+    container.innerHTML = "";
+    return;
+  }
+
+  const rows = [
+    ["Title", web.title],
+    ["URL", web.url],
+    ["Server Relative URL", web.serverRelativeUrl],
+    ["Web ID", web.id],
+    ["Template", web.template],
+    ["Language (LCID)", web.language],
+    ["UI Version", web.uiVersion],
+    ["Created", web.created ? new Date(web.created).toLocaleString() : ""],
+    ["Last Item Modified", web.lastItemModified ? new Date(web.lastItemModified).toLocaleString() : ""]
+  ];
+
+  let html = `<table style="width:100%; border-collapse: collapse; font-size: 11px; background: white; border: 1px solid #d2d0ce;"><tbody>`;
+  rows.forEach(([label, value]) => {
+    html += `<tr>
+      <td style="padding: 5px 6px; border: 1px solid #d2d0ce; background: #f3f2f1; font-weight: 600; width: 30%;">${escapeHtml(label)}</td>
+      <td style="padding: 5px 6px; border: 1px solid #d2d0ce; word-break: break-all;">${escapeHtml(value)}</td>
+    </tr>`;
+  });
+  html += `</tbody></table>`;
+  container.innerHTML = html;
+}
+
+export function renderPropertyBagTable(properties) {
+  const container = document.getElementById('propsTableContainer');
+  if (!container) return;
+
+  if (properties.length === 0) {
+    container.innerHTML = "<p style='font-size:12px; padding:10px;'>No matching properties found.</p>";
+    return;
+  }
+
+  let html = `<table style="width:100%; border-collapse: collapse; font-size: 11px; background: white; table-layout: fixed;">
+    <thead>
+      <tr style="background: #edebe9; text-align: left; position: sticky; top: 0; box-shadow: inset 0 -1px 0 #d2d0ce;">
+        <th style="padding: 6px; border: 1px solid #d2d0ce; width: 38%;">Key</th>
+        <th style="padding: 6px; border: 1px solid #d2d0ce;">Value</th>
+      </tr>
+    </thead>
+    <tbody>`;
+
+  properties.forEach(p => {
+    html += `<tr style="border-bottom: 1px solid #edebe9;">
+      <td style="padding: 6px; border: 1px solid #d2d0ce; font-family: Courier, monospace; font-size: 10px; color: #0078d4; word-break: break-all; vertical-align: top;">${escapeHtml(p.key)}</td>
+      <td style="padding: 6px; border: 1px solid #d2d0ce; font-family: Courier, monospace; font-size: 10px; color: #323130; word-break: break-all; white-space: pre-wrap; vertical-align: top;">${p.value === "" ? '<em style="color:#a19f9d;">(empty)</em>' : escapeHtml(p.value)}</td>
+    </tr>`;
+  });
+
+  html += `</tbody></table>`;
+  container.innerHTML = html;
+}

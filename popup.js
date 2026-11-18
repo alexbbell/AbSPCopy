@@ -5,7 +5,9 @@ import {
   updateStatus,
   switchTab,
   renderVersionTable,
-  renderContentTypeTable
+  renderContentTypeTable,
+  renderSiteInfo,
+  renderPropertyBagTable
 } from './ui.js';
 
 import {
@@ -17,8 +19,29 @@ import {
   exportSharePointItem,
   importSharePointItem,
   fetchSharePointVersions,
-  fetchSharePointContentTypes
+  fetchSharePointContentTypes,
+  resolveSharePointWebUrl,
+  fetchSharePointPropertyBag
 } from './injectedScripts.js';
+
+// Runs an injectable function in the page's MAIN world and resolves with its return value.
+async function runInPage(tabId, func, args = []) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    func: func,
+    args: args,
+    world: 'MAIN'
+  });
+  if (!results || !results[0]) throw new Error("Script injection returned no result.");
+  return results[0].result;
+}
+
+// Resolves the absolute URL of the SharePoint web the given tab belongs to.
+async function getWebUrl(tabId) {
+  const res = await runInPage(tabId, resolveSharePointWebUrl);
+  if (!res || res.error) throw new Error(res ? res.error : "Could not detect SharePoint site context.");
+  return res.webUrl;
+}
 
 
 function init() {
@@ -29,7 +52,8 @@ function init() {
     document.getElementById('tab-copy-item'),
     document.getElementById('tab-item-json'),
     document.getElementById('tab-versions'),
-    document.getElementById('tab-ct-manager')
+    document.getElementById('tab-ct-manager'),
+    document.getElementById('tab-site-props')
   ];
 
   const tabContents = [
@@ -39,7 +63,8 @@ function init() {
     document.getElementById('content-copy-item'),
     document.getElementById('content-item-json'),
     document.getElementById('content-versions'),
-    document.getElementById('content-ct-manager')
+    document.getElementById('content-ct-manager'),
+    document.getElementById('content-site-props')
   ];
 
   tabBtns.forEach((btn, index) => {
@@ -387,29 +412,23 @@ function init() {
       updateStatus("Querying content types...", "info");
       try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const webUrl = await getWebUrl(tab.id);
+        const res = await runInPage(tab.id, fetchSharePointContentTypes, [webUrl]);
+        if (!res) {
+          updateStatus("Failed to fetch Content Types.", "error");
+          return;
+        }
+        if (res.error) {
+          updateStatus(`Error: ${res.error}`, "error");
+          return;
+        }
 
-        chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: fetchSharePointContentTypes,
-          world: 'MAIN'
-        }, (results) => {
-          if (!results || !results[0]) {
-            updateStatus("Failed to fetch Content Types.", "error");
-            return;
-          }
-          const res = results[0].result;
-          if (res.error) {
-            updateStatus(`Error: ${res.error}`, "error");
-            return;
-          }
+        window.cachedContentTypes = res.contentTypes;
+        if (ctFilterInput) ctFilterInput.value = ""; // Reset filter text
+        if (ctFilterContainer) ctFilterContainer.style.display = 'block'; // Show filter UI
 
-          window.cachedContentTypes = res.contentTypes;
-          if (ctFilterInput) ctFilterInput.value = ""; // Reset filter text
-          if (ctFilterContainer) ctFilterContainer.style.display = 'block'; // Show filter UI
-
-          renderContentTypeTable(res.contentTypes);
-          updateStatus(`Loaded ${res.contentTypes.length} content types sorted by title. Click a row to see fields.`, "success");
-        });
+        renderContentTypeTable(res.contentTypes);
+        updateStatus(`Loaded ${res.contentTypes.length} content types sorted by title. Click a row to see fields.`, "success");
       } catch (err) {
         updateStatus(`Execution error: ${err.message}`, "error");
       }
@@ -424,6 +443,70 @@ function init() {
         ct.title.toLowerCase().includes(query)
       );
       renderContentTypeTable(filtered);
+    });
+  }
+
+  // ==========================================
+  // 6. SITE PROPERTIES / PROPERTY BAG
+  // ==========================================
+  const fetchPropsBtn = document.getElementById('fetchPropsBtn');
+  const copyPropsBtn = document.getElementById('copyPropsBtn');
+  const propsFilterInput = document.getElementById('propsFilterInput');
+  const propsFilterContainer = document.getElementById('propsFilterContainer');
+  let cachedProps = null;
+
+  if (fetchPropsBtn) {
+    fetchPropsBtn.addEventListener('click', async () => {
+      updateStatus("Reading site properties...", "info");
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const webUrl = await getWebUrl(tab.id);
+        const res = await runInPage(tab.id, fetchSharePointPropertyBag, [webUrl]);
+        if (!res) {
+          updateStatus("Failed to fetch site properties.", "error");
+          return;
+        }
+        if (res.error) {
+          updateStatus(`Error: ${res.error}`, "error");
+          return;
+        }
+
+        cachedProps = res;
+        if (propsFilterInput) propsFilterInput.value = "";
+        if (propsFilterContainer) propsFilterContainer.style.display = 'block';
+        if (copyPropsBtn) copyPropsBtn.style.display = 'block';
+
+        renderSiteInfo(res.web);
+        renderPropertyBagTable(res.properties);
+        updateStatus(`Loaded ${res.properties.length} properties from ${webUrl}`, "success");
+      } catch (err) {
+        updateStatus(`Execution error: ${err.message}`, "error");
+      }
+    });
+  }
+
+  if (propsFilterInput) {
+    propsFilterInput.addEventListener('input', () => {
+      if (!cachedProps) return;
+      const query = propsFilterInput.value.toLowerCase();
+      const filtered = cachedProps.properties.filter(p =>
+        p.key.toLowerCase().includes(query) || p.value.toLowerCase().includes(query)
+      );
+      renderPropertyBagTable(filtered);
+    });
+  }
+
+  if (copyPropsBtn) {
+    copyPropsBtn.addEventListener('click', async () => {
+      if (!cachedProps) return;
+      const bag = {};
+      cachedProps.properties.forEach(p => { bag[p.key] = p.value; });
+      try {
+        await navigator.clipboard.writeText(JSON.stringify({ web: cachedProps.web, properties: bag }, null, 2));
+        updateStatus("Site properties copied to clipboard as JSON.", "success");
+      } catch (err) {
+        updateStatus(`Clipboard error: ${err.message}`, "error");
+      }
     });
   }
 }

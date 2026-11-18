@@ -261,46 +261,52 @@ export async function addSharePointColumns(columns, prefix, group) {
   }
 }
 
-export async function fetchSharePointContentTypes() {
+// Injectable: resolves the absolute URL of the SharePoint web the active page belongs to.
+// Runs in the page (MAIN world); returns { webUrl } or { error }.
+export async function resolveSharePointWebUrl() {
   try {
-    // Must stay self-contained: this function is serialized and injected into the page.
-    async function resolveWebUrl() {
-      if (typeof _spPageContextInfo !== 'undefined' && _spPageContextInfo) {
-        if (_spPageContextInfo.webAbsoluteUrl) return _spPageContextInfo.webAbsoluteUrl.replace(/\/$/, "");
-        if (_spPageContextInfo.webServerRelativeUrl) {
-          return window.location.origin + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
-        }
+    if (typeof _spPageContextInfo !== 'undefined' && _spPageContextInfo) {
+      if (_spPageContextInfo.webAbsoluteUrl) return { webUrl: _spPageContextInfo.webAbsoluteUrl.replace(/\/$/, "") };
+      if (_spPageContextInfo.webServerRelativeUrl) {
+        return { webUrl: window.location.origin + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "") };
       }
-
-      // Modern pages may not expose _spPageContextInfo: derive candidate web paths from the URL
-      // and let SharePoint tell us the real web URL via /_api/contextinfo.
-      const path = decodeURIComponent(window.location.pathname);
-      const cutMarkers = ["/_layouts/", "/Lists/", "/SitePages/", "/Pages/", "/Forms/", "/Shared Documents", "/Freigegebene Dokumente"];
-      let basePath = path;
-      for (const marker of cutMarkers) {
-        const i = basePath.toLowerCase().indexOf(marker.toLowerCase());
-        if (i >= 0) basePath = basePath.substring(0, i);
-      }
-      const candidates = [basePath.replace(/\/[^\/]*\.aspx$/i, "").replace(/\/$/, "")];
-      const m = path.match(/^\/(sites|teams|personal)\/[^\/]+/i);
-      if (m) candidates.push(m[0]);
-      candidates.push("");
-
-      for (const c of [...new Set(candidates)]) {
-        try {
-          const r = await fetch(`${window.location.origin}${encodeURI(c)}/_api/contextinfo`, {
-            method: "POST",
-            headers: { "Accept": "application/json;odata=nometadata" }
-          });
-          if (!r.ok) continue;
-          const d = await r.json();
-          if (d && d.WebFullUrl) return d.WebFullUrl.replace(/\/$/, "");
-        } catch (e) { /* try next candidate */ }
-      }
-      throw new Error("Could not detect SharePoint site context. Open a page of the SharePoint site and try again.");
     }
 
-    const siteUrl = await resolveWebUrl();
+    // Modern pages may not expose _spPageContextInfo: derive candidate web paths from the URL
+    // and let SharePoint tell us the real web URL via /_api/contextinfo.
+    const path = decodeURIComponent(window.location.pathname);
+    const cutMarkers = ["/_layouts/", "/Lists/", "/SitePages/", "/Pages/", "/Forms/", "/Shared Documents", "/Freigegebene Dokumente"];
+    let basePath = path;
+    for (const marker of cutMarkers) {
+      const i = basePath.toLowerCase().indexOf(marker.toLowerCase());
+      if (i >= 0) basePath = basePath.substring(0, i);
+    }
+    const candidates = [basePath.replace(/\/[^\/]*\.aspx$/i, "").replace(/\/$/, "")];
+    const m = path.match(/^\/(sites|teams|personal)\/[^\/]+/i);
+    if (m) candidates.push(m[0]);
+    candidates.push("");
+
+    for (const c of [...new Set(candidates)]) {
+      try {
+        const r = await fetch(`${window.location.origin}${encodeURI(c)}/_api/contextinfo`, {
+          method: "POST",
+          headers: { "Accept": "application/json;odata=nometadata" }
+        });
+        if (!r.ok) continue;
+        const d = await r.json();
+        if (d && d.WebFullUrl) return { webUrl: d.WebFullUrl.replace(/\/$/, "") };
+      } catch (e) { /* try next candidate */ }
+    }
+    return { error: "Could not detect SharePoint site context. Open a page of the SharePoint site and try again." };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+export async function fetchSharePointContentTypes(webUrl) {
+  try {
+    if (!webUrl) throw new Error("SharePoint web URL was not provided.");
+    const siteUrl = String(webUrl).replace(/\/$/, "");
     const restUrl = `${siteUrl}/_api/web/contenttypes?$select=StringId,Name,Group,Fields/Id,Fields/Title,Fields/InternalName,Fields/TypeAsString&$expand=Fields`;
 
     const res = await fetch(restUrl, {
@@ -329,6 +335,60 @@ export async function fetchSharePointContentTypes() {
     return { error: null, contentTypes: formattedCts };
   } catch (e) {
     return { error: e.message, contentTypes: [] };
+  }
+}
+
+// Injectable: reads basic web info plus the full property bag (AllProperties) of the given web.
+export async function fetchSharePointPropertyBag(webUrl) {
+  try {
+    if (!webUrl) throw new Error("SharePoint web URL was not provided.");
+    const siteUrl = String(webUrl).replace(/\/$/, "");
+    const headers = { "Accept": "application/json;odata=nometadata" };
+
+    // REST encodes special characters in property names as _xHHHH_ (e.g. "_" -> "_x005f_").
+    function decodeKey(key) {
+      return key.replace(/_x([0-9a-fA-F]{4})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    }
+
+    const [webRes, propsRes] = await Promise.all([
+      fetch(`${siteUrl}/_api/web?$select=Id,Title,Url,ServerRelativeUrl,WebTemplate,Configuration,Language,Created,LastItemModifiedDate,UIVersion`, { headers }),
+      fetch(`${siteUrl}/_api/web/AllProperties`, { headers })
+    ]);
+
+    if (!propsRes.ok) {
+      const t = await propsRes.text();
+      let msg = t; try { msg = JSON.parse(t)['odata.error'].message.value; } catch (e) {}
+      throw new Error(`Property bag request failed (${propsRes.status}): ${msg}`);
+    }
+    const propsData = await propsRes.json();
+
+    const properties = Object.keys(propsData)
+      .filter(k => !k.startsWith("odata."))
+      .map(k => {
+        const v = propsData[k];
+        return { key: decodeKey(k), value: v === null || v === undefined ? "" : (typeof v === "object" ? JSON.stringify(v) : String(v)) };
+      })
+      .sort((a, b) => a.key.localeCompare(b.key, undefined, { sensitivity: "base" }));
+
+    let web = null;
+    if (webRes.ok) {
+      const w = await webRes.json();
+      web = {
+        title: w.Title,
+        url: w.Url,
+        serverRelativeUrl: w.ServerRelativeUrl,
+        id: w.Id,
+        template: `${w.WebTemplate}#${w.Configuration}`,
+        language: w.Language,
+        uiVersion: w.UIVersion,
+        created: w.Created,
+        lastItemModified: w.LastItemModifiedDate
+      };
+    }
+
+    return { error: null, web: web, properties: properties };
+  } catch (e) {
+    return { error: e.message, web: null, properties: [] };
   }
 }
 

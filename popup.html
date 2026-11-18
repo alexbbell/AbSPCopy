@@ -117,6 +117,7 @@
     <button class="tab-btn" id="tab-item-json">Export/Import Item</button>
     <button class="tab-btn" id="tab-versions">Version Viewer</button>
     <button class="tab-btn" id="tab-ct-manager">Content Type Manager</button>
+    <button class="tab-btn" id="tab-site-props">Site Properties</button>
   </div>
 
   <div id="status" class="status"></div>
@@ -235,6 +236,25 @@
     
     <div id="ctTableContainer" style="overflow-x: auto; max-height: 250px; width: 100%; border: 1px solid #edebe9; border-radius: 2px;"></div>
     <div id="ctFieldsContainer" style="margin-top: 20px; overflow-x: auto; max-height: 250px; width: 100%;"></div>
+  </div>
+
+  <div id="content-site-props" class="tab-content" style="display: none;">
+    <p style="font-size: 13px; margin-top: 0; color: #605e5c;">
+      Show the basic info and the <b>property bag</b> (AllProperties) of the SharePoint site (web) the current page belongs to.
+    </p>
+    <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+      <button id="fetchPropsBtn" class="action-btn">Fetch Site Properties</button>
+      <button id="copyPropsBtn" class="action-btn danger-btn" style="width: auto; white-space: nowrap; color: #0078d4; border-color: #0078d4; display: none;">Copy as JSON</button>
+    </div>
+
+    <div id="siteInfoContainer" style="margin-bottom: 15px;"></div>
+
+    <div class="form-group" id="propsFilterContainer" style="display: none; margin-bottom: 15px;">
+      <label for="propsFilterInput">Filter by Key or Value</label>
+      <input type="text" id="propsFilterInput" placeholder="Type to filter properties...">
+    </div>
+
+    <div id="propsTableContainer" style="overflow: auto; max-height: 320px; width: 100%; border: 1px solid #edebe9; border-radius: 2px;"></div>
   </div>
 
   <script type="module" src="popup.js"></script>
