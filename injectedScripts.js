@@ -263,7 +263,44 @@ export async function addSharePointColumns(columns, prefix, group) {
 
 export async function fetchSharePointContentTypes() {
   try {
-    const siteUrl = window.location.protocol + "//" + window.location.host + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
+    // Must stay self-contained: this function is serialized and injected into the page.
+    async function resolveWebUrl() {
+      if (typeof _spPageContextInfo !== 'undefined' && _spPageContextInfo) {
+        if (_spPageContextInfo.webAbsoluteUrl) return _spPageContextInfo.webAbsoluteUrl.replace(/\/$/, "");
+        if (_spPageContextInfo.webServerRelativeUrl) {
+          return window.location.origin + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
+        }
+      }
+
+      // Modern pages may not expose _spPageContextInfo: derive candidate web paths from the URL
+      // and let SharePoint tell us the real web URL via /_api/contextinfo.
+      const path = decodeURIComponent(window.location.pathname);
+      const cutMarkers = ["/_layouts/", "/Lists/", "/SitePages/", "/Pages/", "/Forms/", "/Shared Documents", "/Freigegebene Dokumente"];
+      let basePath = path;
+      for (const marker of cutMarkers) {
+        const i = basePath.toLowerCase().indexOf(marker.toLowerCase());
+        if (i >= 0) basePath = basePath.substring(0, i);
+      }
+      const candidates = [basePath.replace(/\/[^\/]*\.aspx$/i, "").replace(/\/$/, "")];
+      const m = path.match(/^\/(sites|teams|personal)\/[^\/]+/i);
+      if (m) candidates.push(m[0]);
+      candidates.push("");
+
+      for (const c of [...new Set(candidates)]) {
+        try {
+          const r = await fetch(`${window.location.origin}${encodeURI(c)}/_api/contextinfo`, {
+            method: "POST",
+            headers: { "Accept": "application/json;odata=nometadata" }
+          });
+          if (!r.ok) continue;
+          const d = await r.json();
+          if (d && d.WebFullUrl) return d.WebFullUrl.replace(/\/$/, "");
+        } catch (e) { /* try next candidate */ }
+      }
+      throw new Error("Could not detect SharePoint site context. Open a page of the SharePoint site and try again.");
+    }
+
+    const siteUrl = await resolveWebUrl();
     const restUrl = `${siteUrl}/_api/web/contenttypes?$select=StringId,Name,Group,Fields/Id,Fields/Title,Fields/InternalName,Fields/TypeAsString&$expand=Fields`;
 
     const res = await fetch(restUrl, {
@@ -488,6 +525,137 @@ export async function duplicateSharePointItem(manualId) {
     const createdItem = await createRes.json();
     return { error: null, newItemId: createdItem.Id || createdItem.ID };
 
+  } catch (e) {
+    return { error: e.message, newItemId: null };
+  }
+}
+
+// NOTE: this function is passed directly to chrome.scripting.executeScript({ func: ... }),
+// which serializes only its own source and runs it standalone in the target page's world.
+// It must not reference anything declared outside itself (no outer consts/helpers).
+export async function exportSharePointItem(manualId) {
+  try {
+    const urlParams = new URLSearchParams(window.location.search);
+    let listId = urlParams.get('List');
+    let itemId = manualId || urlParams.get('ID');
+
+    if (!listId && typeof _spPageContextInfo !== 'undefined' && _spPageContextInfo.pageListId) {
+      listId = _spPageContextInfo.pageListId;
+    }
+    if (!listId && window.Ctx) {
+      listId = window.Ctx.listName;
+    }
+
+    if (!listId) throw new Error("Could not detect List ID from context/URL.");
+    if (!itemId) throw new Error("Could not detect Item ID from URL. Please enter it manually.");
+
+    listId = listId.replace(/[{}]/g, "");
+    const siteUrl = window.location.protocol + "//" + window.location.host + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
+
+    const fieldsRes = await fetch(`${siteUrl}/_api/web/lists/getbyid('${listId}')/fields?$filter=ReadOnlyField eq false and Hidden eq false`, {
+      method: "GET",
+      headers: { "Accept": "application/json;odata=nometadata" }
+    });
+    if (!fieldsRes.ok) throw new Error("Failed to fetch writable list fields.");
+    const fieldsData = await fieldsRes.json();
+
+    const excludedSystemFields = [
+      "contenttype", "attachments", "folderchildcount", "itemchildcount",
+      "edit", "linktitlenomenu", "linktitle", "docicon", "appauthor", "appeditor"
+    ];
+
+    const writableFields = fieldsData.value.filter(f => !excludedSystemFields.includes(f.InternalName.toLowerCase()));
+
+    const itemRes = await fetch(`${siteUrl}/_api/web/lists/getbyid('${listId}')/items(${itemId})`, {
+      method: "GET",
+      headers: { "Accept": "application/json;odata=nometadata" }
+    });
+    if (!itemRes.ok) throw new Error(`Could not locate source item ID #${itemId}.`);
+    const sourceItem = await itemRes.json();
+
+    const exportedItem = {};
+    writableFields.forEach(field => {
+      const name = field.InternalName;
+      if (sourceItem.hasOwnProperty(name) && sourceItem[name] !== null && sourceItem[name] !== undefined) {
+        exportedItem[name] = sourceItem[name];
+      }
+    });
+
+    return { error: null, item: exportedItem, itemId: itemId };
+  } catch (e) {
+    return { error: e.message, item: null };
+  }
+}
+
+// NOTE: this function is passed directly to chrome.scripting.executeScript({ func: ... }),
+// which serializes only its own source and runs it standalone in the target page's world.
+// It must not reference anything declared outside itself (no outer consts/helpers).
+export async function importSharePointItem(itemData) {
+  try {
+    const urlParams = new URLSearchParams(window.location.search);
+    let listId = urlParams.get('List');
+
+    if (!listId && typeof _spPageContextInfo !== 'undefined' && _spPageContextInfo.pageListId) {
+      listId = _spPageContextInfo.pageListId;
+    }
+    if (!listId && window.Ctx) {
+      listId = window.Ctx.listName;
+    }
+
+    if (!listId) throw new Error("Could not detect List ID. Open a page for the target list first.");
+
+    listId = listId.replace(/[{}]/g, "");
+    const siteUrl = window.location.protocol + "//" + window.location.host + _spPageContextInfo.webServerRelativeUrl.replace(/\/$/, "");
+
+    let formDigest = _spPageContextInfo.formDigestValue || (document.getElementById('__REQUESTDIGEST') ? document.getElementById('__REQUESTDIGEST').value : null);
+    if (!formDigest) {
+      const digestRes = await fetch(`${siteUrl}/_api/contextinfo`, {
+        method: "POST",
+        headers: { "Accept": "application/json;odata=nometadata" }
+      });
+      if (digestRes.ok) {
+        const digestData = await digestRes.json();
+        formDigest = digestData.FormDigestValue;
+      }
+    }
+    if (!formDigest) throw new Error("Unable to obtain form digest token for operation authorization.");
+
+    const fieldsRes = await fetch(`${siteUrl}/_api/web/lists/getbyid('${listId}')/fields?$filter=ReadOnlyField eq false and Hidden eq false`, {
+      method: "GET",
+      headers: { "Accept": "application/json;odata=nometadata" }
+    });
+    if (!fieldsRes.ok) throw new Error("Failed to fetch writable list fields.");
+    const fieldsData = await fieldsRes.json();
+    const writableNames = new Set(fieldsData.value.map(f => f.InternalName));
+
+    const payload = {};
+    const skippedFields = [];
+    Object.keys(itemData || {}).forEach(key => {
+      if (writableNames.has(key)) {
+        payload[key] = itemData[key];
+      } else {
+        skippedFields.push(key);
+      }
+    });
+
+    const createRes = await fetch(`${siteUrl}/_api/web/lists/getbyid('${listId}')/items`, {
+      method: "POST",
+      headers: {
+        "Accept": "application/json;odata=nometadata",
+        "Content-Type": "application/json;odata=nometadata",
+        "X-RequestDigest": formDigest
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!createRes.ok) {
+      const errText = await createRes.text();
+      let m = errText; try { m = JSON.parse(errText)['odata.error'].message.value; } catch (e) {}
+      throw new Error(m);
+    }
+
+    const createdItem = await createRes.json();
+    return { error: null, newItemId: createdItem.Id || createdItem.ID, skippedFields: skippedFields };
   } catch (e) {
     return { error: e.message, newItemId: null };
   }

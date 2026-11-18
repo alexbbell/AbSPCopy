@@ -14,6 +14,8 @@ import {
   addSharePointColumns,
   removeNonSystemColumns,
   duplicateSharePointItem,
+  exportSharePointItem,
+  importSharePointItem,
   fetchSharePointVersions,
   fetchSharePointContentTypes
 } from './injectedScripts.js';
@@ -25,6 +27,7 @@ function init() {
     document.getElementById('tab-import'),
     document.getElementById('tab-add-columns'),
     document.getElementById('tab-copy-item'),
+    document.getElementById('tab-item-json'),
     document.getElementById('tab-versions'),
     document.getElementById('tab-ct-manager')
   ];
@@ -34,6 +37,7 @@ function init() {
     document.getElementById('content-import'),
     document.getElementById('content-add-columns'),
     document.getElementById('content-copy-item'),
+    document.getElementById('content-item-json'),
     document.getElementById('content-versions'),
     document.getElementById('content-ct-manager')
   ];
@@ -244,6 +248,89 @@ function init() {
           }
 
           updateStatus(`Successfully duplicated item! New Item ID: ${res.newItemId}`, "success");
+        });
+      } catch (err) {
+        updateStatus(`Execution error: ${err.message}`, "error");
+      }
+    });
+  }
+
+  // ==========================================
+  // 3b. EXPORT/IMPORT ITEM AS JSON FUNCTIONALITY
+  // ==========================================
+  const exportItemBtn = document.getElementById('exportItemBtn');
+  if (exportItemBtn) {
+    exportItemBtn.addEventListener('click', async () => {
+      updateStatus("Exporting item...", "info");
+      const manualId = document.getElementById('exportItemId').value.trim();
+      const outputEl = document.getElementById('exportItemOutput');
+
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: exportSharePointItem,
+          args: [manualId],
+          world: 'MAIN'
+        }, (results) => {
+          if (!results || !results[0]) {
+            updateStatus("Failed to communicate with page.", "error");
+            return;
+          }
+          const res = results[0].result;
+          if (res.error) {
+            updateStatus(`Error: ${res.error}`, "error");
+            return;
+          }
+
+          if (outputEl) outputEl.value = JSON.stringify(res.item, null, 2);
+          updateStatus(`Exported item #${res.itemId} as JSON.`, "success");
+        });
+      } catch (err) {
+        updateStatus(`Execution error: ${err.message}`, "error");
+      }
+    });
+  }
+
+  const importItemBtn = document.getElementById('importItemBtn');
+  if (importItemBtn) {
+    importItemBtn.addEventListener('click', async () => {
+      const rawJson = document.getElementById('importItemInput').value.trim();
+      if (!rawJson) return updateStatus("Please paste item JSON data.", "error");
+
+      let itemData;
+      try {
+        itemData = JSON.parse(rawJson);
+      } catch (e) {
+        return updateStatus(`Invalid JSON structure: ${e.message}`, "error");
+      }
+
+      updateStatus("Importing item...", "info");
+
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+        chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: importSharePointItem,
+          args: [itemData],
+          world: 'MAIN'
+        }, (results) => {
+          if (!results || !results[0]) {
+            updateStatus("Failed to communicate with page.", "error");
+            return;
+          }
+          const res = results[0].result;
+          if (res.error) {
+            updateStatus(`Error: ${res.error}`, "error");
+            return;
+          }
+
+          const skipped = res.skippedFields && res.skippedFields.length
+            ? ` Skipped field(s) not on this list: ${res.skippedFields.join(', ')}.`
+            : "";
+          updateStatus(`Created new item #${res.newItemId}.${skipped}`, skipped ? "info" : "success");
         });
       } catch (err) {
         updateStatus(`Execution error: ${err.message}`, "error");
